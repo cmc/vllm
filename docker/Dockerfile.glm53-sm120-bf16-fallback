@@ -1,0 +1,19 @@
+FROM vllm/vllm-openai@sha256:2e771fa615452282cc331eb418b3ef21636fce355bea0491fca89e6d362ab703
+
+COPY vllm/v1/attention/backends/mla/glm53_nope_fallback.py \
+  /usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/glm53_nope_fallback.py
+COPY vllm/v1/attention/backends/mla/flashinfer_mla_sparse.py \
+  /usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/flashinfer_mla_sparse.py
+COPY vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm120.py \
+  /usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm120.py
+COPY vllm/platforms/cuda.py \
+  /usr/local/lib/python3.12/dist-packages/vllm/platforms/cuda.py
+COPY vllm/v1/worker/utils.py \
+  /usr/local/lib/python3.12/dist-packages/vllm/v1/worker/utils.py
+
+RUN python3 -m py_compile \
+  /usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/glm53_nope_fallback.py \
+  /usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/flashinfer_mla_sparse.py \
+  /usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm120.py \
+  /usr/local/lib/python3.12/dist-packages/vllm/platforms/cuda.py \
+  /usr/local/lib/python3.12/dist-packages/vllm/v1/worker/utils.py

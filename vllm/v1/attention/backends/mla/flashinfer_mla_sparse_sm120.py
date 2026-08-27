@@ -15,6 +15,9 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseMetadata,
     _get_workspace_buffer,
 )
+from vllm.v1.attention.backends.mla.glm53_nope_fallback import (
+    bf16_nope_sparse_attention,
+)
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
@@ -64,15 +67,19 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
-        if self.kv_cache_dtype != "fp8_ds_mla":
-            raise NotImplementedError(
-                "FLASHINFER_MLA_SPARSE_SM120 requires the packed fp8_ds_mla "
-                f"KV cache layout; got kv_cache_dtype={kv_cache_dtype!r}."
-            )
-
         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.qk_nope_head_dim: int = mla_args["qk_nope_head_dim"]
         self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
+        supports_bf16_nope = (
+            self.kv_cache_dtype == "bfloat16" and self.qk_rope_head_dim == 0
+        )
+        if self.kv_cache_dtype != "fp8_ds_mla" and not supports_bf16_nope:
+            raise NotImplementedError(
+                "FLASHINFER_MLA_SPARSE_SM120 requires the packed fp8_ds_mla "
+                "KV cache layout or the BF16 native-NoPE fallback; "
+                f"got kv_cache_dtype={kv_cache_dtype!r}."
+            )
+
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
@@ -92,7 +99,10 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
         )
         from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
 
-        if not has_flashinfer_sparse_mla_sm120():
+        if (
+            self.kv_cache_dtype == "fp8_ds_mla"
+            and not has_flashinfer_sparse_mla_sm120()
+        ):
             raise RuntimeError(
                 "FLASHINFER_MLA_SPARSE_SM120 requires FlashInfer's "
                 "sparse MLA decode API."
@@ -116,6 +126,31 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
 
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
+
+        if self.kv_cache_dtype == "bfloat16" and self.qk_rope_head_dim == 0:
+            topk_indices_physical, valid_counts = cast(
+                tuple[torch.Tensor, torch.Tensor],
+                triton_convert_req_index_to_global_index(
+                    attn_metadata.req_id_per_token[:num_actual_toks],
+                    attn_metadata.block_table,
+                    topk_indices,
+                    BLOCK_SIZE=attn_metadata.block_size,
+                    NUM_TOPK_TOKENS=topk_indices.shape[1],
+                    return_valid_counts=True,
+                ),
+            )
+            # Preserve the exact 512-wide absorbed NoPE latent layout at the
+            # cost of an unfused indexed-gather/torch.bmm decode path.
+            return (
+                bf16_nope_sparse_attention(
+                    q,
+                    kv_c_and_k_pe_cache,
+                    topk_indices_physical,
+                    valid_counts,
+                    self.scale,
+                ),
+                None,
+            )
 
         topk_indices_physical = cast(
             torch.Tensor,

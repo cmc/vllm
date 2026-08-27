@@ -158,6 +158,7 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "bfloat16",
         "auto",
         "fp8",
         "fp8_e4m3",
@@ -200,7 +201,22 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
         from vllm.config import get_current_vllm_config
         from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
 
-        if not has_flashinfer_sparse_mla_sm120():
+        vllm_config = get_current_vllm_config()
+        hf_text_config = (
+            vllm_config.model_config.hf_text_config
+            if vllm_config.model_config is not None
+            else None
+        )
+        supports_bf16_nope = (
+            kv_cache_dtype == "bfloat16"
+            and hf_text_config is not None
+            and getattr(hf_text_config, "qk_rope_head_dim", None) == 0
+        )
+        if kv_cache_dtype == "bfloat16" and not supports_bf16_nope:
+            return "bfloat16 KV cache requires native NoPE (qk_rope_head_dim=0)"
+        # The BF16 NoPE path is implemented entirely with PyTorch and does not
+        # depend on FlashInfer's packed sparse-MLA decode API.
+        if not supports_bf16_nope and not has_flashinfer_sparse_mla_sm120():
             return (
                 "FLASHINFER_MLA_SPARSE_SM120 requires FlashInfer's "
                 "sparse MLA decode API"
@@ -208,6 +224,7 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
         if dtype != torch.bfloat16:
             return "dtype not supported"
         if kv_cache_dtype not in (
+            "bfloat16",
             None,
             "auto",
             "fp8",
@@ -215,9 +232,7 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
             "fp8_ds_mla",
         ):
             return "kv_cache_dtype not supported"
-        vllm_config = get_current_vllm_config()
-        if vllm_config.model_config is not None:
-            hf_text_config = vllm_config.model_config.hf_text_config
+        if hf_text_config is not None:
             index_topk = getattr(hf_text_config, "index_topk", None)
             if index_topk is None:
                 return (
@@ -239,9 +254,11 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        if cache_dtype_str in ("auto", "fp8", "fp8_e4m3", "fp8_ds_mla"):
+        if cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_ds_mla"):
             # fp8_ds_mla packed layout: 512 NoPE + 16 scales + 128 RoPE.
             return (num_blocks, block_size, 656)
+        # auto/BF16 use the logical unpacked width that the existing BF16
+        # writer handles correctly, trading cache capacity for compatibility.
         return (num_blocks, block_size, head_size)
 
     @classmethod
