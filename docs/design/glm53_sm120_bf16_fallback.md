@@ -12,7 +12,8 @@ The source baseline is commit
 the official image
 `vllm/vllm-openai@sha256:2e771fa615452282cc331eb418b3ef21636fce355bea0491fca89e6d362ab703`.
 Validation used four RTX PRO 6000 Blackwell Max-Q GPUs with compute capability
-SM120.
+SM120 and `zai-org/GLM-5.3-Flash` revision
+`3f1971b7b5f7a528c9c4ef6212c8785298a8c24a`.
 
 The patch leaves the checkpoint and global FP8 quantization configuration
 unchanged, while selecting an explicit BF16 KV cache. GLM-5.3 is a
@@ -251,11 +252,22 @@ controls as passed and all nine compatibility assertions as failed.
 ### Runtime validation
 
 The following sanitized launch reproduces the validated four-GPU configuration.
-Set `MODEL_DIR` to a local GLM-5.3-Flash checkpoint; no API key is required for
-this loopback-only server.
+First acquire the exact public model and tokenizer revision used for the
+recorded results:
 
 ```bash
-export MODEL_DIR=/path/to/GLM-5.3-Flash
+# Requires the Hugging Face CLI from the huggingface_hub package.
+export MODEL_REVISION=3f1971b7b5f7a528c9c4ef6212c8785298a8c24a
+export MODEL_DIR="$PWD/models/GLM-5.3-Flash-$MODEL_REVISION"
+
+hf download zai-org/GLM-5.3-Flash \
+  --revision "$MODEL_REVISION" \
+  --local-dir "$MODEL_DIR"
+```
+
+No API key is required for the loopback-only server:
+
+```bash
 export BASE_URL=http://127.0.0.1:5001
 
 docker run --detach --rm \
@@ -325,9 +337,10 @@ print(f"PASS GPU KV capacity: {capacity:,} tokens")
 '
 ```
 
-The validated four-B200 launch prints `975,077 tokens`. The lower-bound
-assertion keeps the command useful on a different memory configuration while
-still proving that one full 262,144-token sequence fits.
+The validated launch on four RTX PRO 6000 Blackwell Max-Q GPUs prints
+`975,077 tokens`. The lower-bound assertion keeps the command useful on a
+different memory configuration while still proving that one full 262,144-token
+sequence fits.
 
 Run two fixed-seed requests and compare their normalized outputs:
 
@@ -378,7 +391,7 @@ python3 examples/generate/glm53_sm120_long_context.py \
   --base-url "$BASE_URL"
 ```
 
-On the validated checkpoint its final output is:
+At the pinned model revision the client requires and prints:
 
 ```text
 PROMPT_TOKENS=239994

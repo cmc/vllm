@@ -10,6 +10,7 @@ import urllib.request
 MODEL = "GLM-5.3-Flash"
 NEEDLE = "RIVENDELL-262K-PASS"
 TARGET_TOKENS = 240_000
+EXPECTED_PROMPT_TOKENS = 239_994
 EXPECTED_MAX_MODEL_LEN = 262_144
 UNIT = "Neutral filler sentence for validating a long context window. "
 PREFIX = (
@@ -63,7 +64,7 @@ def main() -> None:
     while prompt_tokens > TARGET_TOKENS:
         repeats -= 1
         prompt_tokens = count_tokens(base_url, repeats)
-    assert TARGET_TOKENS - tokens_per_repeat <= prompt_tokens <= TARGET_TOKENS
+    assert prompt_tokens == EXPECTED_PROMPT_TOKENS, prompt_tokens
     print(f"PROMPT_TOKENS={prompt_tokens}")
 
     started = time.monotonic()
