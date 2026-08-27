@@ -248,6 +248,211 @@ docker run --rm --gpus device=0 \
 The baseline command is expected to exit nonzero after reporting all three
 controls as passed and all nine compatibility assertions as failed.
 
+### Runtime validation
+
+The following sanitized launch reproduces the validated four-GPU configuration.
+Set `MODEL_DIR` to a local GLM-5.3-Flash checkpoint; no API key is required for
+this loopback-only server.
+
+```bash
+export MODEL_DIR=/path/to/GLM-5.3-Flash
+export BASE_URL=http://127.0.0.1:5001
+
+docker run --detach --rm \
+  --name glm53-sm120-validation \
+  --gpus all \
+  --ipc host \
+  --network host \
+  --shm-size 32g \
+  --env CUDA_VISIBLE_DEVICES=0,1,2,3 \
+  --env CUDA_DEVICE_MAX_CONNECTIONS=32 \
+  --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  --mount "type=bind,src=$MODEL_DIR,dst=/model,readonly" \
+  --entrypoint /usr/local/bin/vllm \
+  local/vllm-glm53:sm120-nope-bf16-source \
+  serve /model \
+  --served-model-name GLM-5.3-Flash \
+  --trust-remote-code \
+  --host 0.0.0.0 \
+  --port 5001 \
+  --tensor-parallel-size 4 \
+  --kv-cache-dtype bfloat16 \
+  --tool-call-parser glm47 \
+  --reasoning-parser glm45 \
+  --enable-auto-tool-choice \
+  --enable-chunked-prefill \
+  --max-model-len 262144 \
+  --gpu-memory-utilization 0.95 \
+  --max-num-batched-tokens 2048 \
+  --max-num-seqs 2 \
+  --load-format fastsafetensors
+```
+
+Wait for startup and verify the served model and advertised context:
+
+```bash
+until curl --fail --silent "$BASE_URL/health"; do sleep 5; done
+
+curl --fail --silent "$BASE_URL/v1/models" | python3 -c '
+import json
+import sys
+
+model = json.load(sys.stdin)["data"][0]
+assert model["id"] == "GLM-5.3-Flash", model
+assert model["max_model_len"] == 262144, model
+print("PASS startup and model metadata")
+'
+```
+
+Extract and check the initialized KV capacity from the same launch:
+
+```bash
+docker logs glm53-sm120-validation 2>&1 | python3 -c '
+import re
+import sys
+
+values = [
+    int(value.replace(",", ""))
+    for value in re.findall(
+        r"GPU KV cache size: ([0-9,]+) tokens",
+        sys.stdin.read(),
+    )
+]
+assert values, "capacity log not found"
+capacity = values[-1]
+assert capacity >= 262144, capacity
+print(f"PASS GPU KV capacity: {capacity:,} tokens")
+'
+```
+
+The validated four-B200 launch prints `975,077 tokens`. The lower-bound
+assertion keeps the command useful on a different memory configuration while
+still proving that one full 262,144-token sequence fits.
+
+Run two fixed-seed requests and compare their normalized outputs:
+
+```bash
+python3 - <<'PY'
+import json
+import os
+import urllib.request
+
+payload = {
+    "model": "GLM-5.3-Flash",
+    "messages": [
+        {
+            "role": "user",
+            "content": "Return exactly PATCH_OK and nothing else.",
+        }
+    ],
+    "temperature": 0,
+    "seed": 123,
+    "max_tokens": 128,
+}
+outputs = []
+for _ in range(2):
+    request = urllib.request.Request(
+        os.environ["BASE_URL"] + "/v1/chat/completions",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=900) as response:
+        choice = json.loads(response.read())["choices"][0]
+    outputs.append(
+        {
+            "finish_reason": choice["finish_reason"],
+            "message": choice["message"],
+        }
+    )
+
+assert outputs[0] == outputs[1], outputs
+assert outputs[0]["message"]["content"] == "PATCH_OK", outputs[0]
+print("PASS deterministic short generation")
+PY
+```
+
+Run the published near-limit retrieval client:
+
+```bash
+python3 examples/generate/glm53_sm120_long_context.py \
+  --base-url "$BASE_URL"
+```
+
+On the validated checkpoint its final output is:
+
+```text
+PROMPT_TOKENS=239994
+REQUEST_SECONDS=<hardware-dependent>
+PASS long-context retrieval
+```
+
+Finally, an isolated OpenCode configuration can test the OpenAI-compatible
+provider without reading or modifying the user's normal OpenCode config:
+
+```bash
+export OPENCODE_CONFIG_CONTENT='{
+  "provider": {
+    "glm53": {
+      "api": "openai",
+      "options": {
+        "baseURL": "http://127.0.0.1:5001/v1",
+        "apiKey": "EMPTY"
+      },
+      "models": {
+        "GLM-5.3-Flash": {
+          "name": "GLM-5.3-Flash",
+          "reasoning": true,
+          "tool_call": true,
+          "temperature": true,
+          "limit": {
+            "context": 262144,
+            "output": 16384
+          }
+        }
+      }
+    }
+  },
+  "model": "glm53/GLM-5.3-Flash"
+}'
+temporary_config="$(mktemp -d)"
+
+XDG_CONFIG_HOME="$temporary_config" opencode debug config | python3 -c '
+import json
+import sys
+
+config = json.load(sys.stdin)
+model = config["provider"]["glm53"]["models"]["GLM-5.3-Flash"]
+assert config["model"] == "glm53/GLM-5.3-Flash", config["model"]
+assert model["limit"] == {"context": 262144, "output": 16384}, model
+print("PASS OpenCode resolved config")
+'
+
+XDG_CONFIG_HOME="$temporary_config" \
+  opencode run --format json \
+  "Return exactly OPENCODE_OK and nothing else." |
+  python3 -c '
+import json
+import sys
+
+events = [json.loads(line) for line in sys.stdin if line.strip()]
+assert any(
+    event.get("type") == "text"
+    and event.get("part", {}).get("text") == "OPENCODE_OK"
+    for event in events
+), events
+print("PASS OpenCode default-model generation")
+'
+
+rm -rf "$temporary_config"
+unset OPENCODE_CONFIG_CONTENT
+```
+
+Stop the disposable validation server when finished:
+
+```bash
+docker stop glm53-sm120-validation
+```
+
 ## Non-goals
 
 - No FP4 cache implementation.
@@ -276,5 +481,5 @@ controls as passed and all nine compatibility assertions as failed.
 
 This note and the reproducible overlay contain no credentials, access tokens,
 private endpoints, or private runtime configuration. The published artifact is
-limited to the compatibility source, focused tests, Dockerfile, and this design
-record.
+limited to the compatibility source, focused tests, Dockerfile, long-context
+validation client, and this design record.
