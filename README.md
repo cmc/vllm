@@ -1,4 +1,59 @@
 <!-- markdownlint-disable MD001 MD041 -->
+> [!WARNING]
+> **This is not stock vLLM.** This is a temporary, hacked-up compatibility
+> fork for running GLM-5.3-Flash on **4 × NVIDIA RTX PRO 6000 Blackwell Max-Q
+> GPUs (SM120)**. It is a correctness-first operational patch, not an
+> upstream-ready performance implementation.
+
+## Temporary GLM-5.3 SM120 compatibility fork
+
+This branch is anchored to vLLM commit
+`933876c388fb129ad82590660e6506614559cb86`, the GLM-5.3 integration baseline
+that matches the validated runtime image.
+
+### What this fork changes
+
+- Adds an unpacked BF16 KV-cache fallback for GLM-5.3's native NoPE sparse-MLA
+  decode path while leaving the checkpoint/global FP8 quantization
+  configuration unchanged.
+- Converts each request's virtual sparse top-k indices into physical cache
+  indices with valid counts and keeps all 2,048 selected tokens.
+- Uses chunked PyTorch gather and `torch.bmm` attention because the available
+  fused SM120 path requires a 64-wide RoPE tail that GLM-5.3 does not have.
+- Enforces the SM120 non-FP4 DeepGEMM `block_kv=64` contract for logical kpool
+  alignment and physical compressed pages.
+
+### Validated deployment
+
+- Hardware: 4 × RTX PRO 6000 Blackwell Max-Q GPUs (SM120).
+- Model: GLM-5.3-Flash with explicit BF16 KV cache.
+- Served context: 262,144 tokens.
+- Measured KV-cache capacity: 975,077 tokens.
+- Focused tests: 12/12 passed in the digest-pinned source-overlay image.
+- Runtime checks: startup, deterministic generation, image input, and a
+  239,994-token early-needle retrieval returning `RIVENDELL-262K-PASS`.
+
+### Important limitations
+
+- BF16 KV storage uses more memory than packed FP8 or a future FP4 path.
+- Indexed gathers, temporary tensors, Python chunking, and `torch.bmm` are
+  slower than a fused sparse-MLA kernel.
+- This fork does not implement or claim FP4 KV cache, MTP validation, a fused
+  NoPE kernel, or upstream-quality performance.
+- The SM120 64-entry page rule is architecture-specific and should be removed
+  when the underlying kernels expose a compatible native capability.
+
+### Build, tests, and investigation record
+
+- [Complete design and failure chronology](docs/design/glm53_sm120_bf16_fallback.md)
+- [Digest-pinned overlay Dockerfile](docker/Dockerfile.glm53-sm120-bf16-fallback)
+- [Focused SM120 regression tests](tests/v1/attention/test_glm53_nope_sm120.py)
+- [Internal fork pull request](https://github.com/cmc/vllm/pull/1)
+
+The remainder of this file is the original upstream vLLM README.
+
+---
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/assets/logos/vllm-logo-text-dark.png">
