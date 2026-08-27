@@ -432,10 +432,17 @@ class CudaPlatformBase(Platform):
             return None
         from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
 
+        capability = cls.get_device_capability()
+        min_page_size = min(PAGED_MQA_PAGE_SIZES)
+        if capability is not None and capability.major == 12:
+            # Avoid the SM120 non-FP4 DeepGEMM block_kv assertion by using its
+            # required 64-entry page. This architecture-specific constraint
+            # can go once DeepGEMM exposes a queryable page capability.
+            min_page_size = 64
         # kpool paged-MQA indexer: the storage block (block_size /
         # index_kpool) is virtually split into pool pages, so block_size
-        # must be a multiple of index_kpool * min(PAGED_MQA_PAGE_SIZES).
-        return index_kpool * min(PAGED_MQA_PAGE_SIZES)
+        # must be a multiple of index_kpool * min_page_size.
+        return index_kpool * min_page_size
 
     @classmethod
     def get_attn_backend_cls(

@@ -62,6 +62,15 @@ def compressed_kernel_block_size(spec: AttentionSpec) -> int:
     """
     storage = spec.storage_block_size
     max_page, min_page = max(PAGED_MQA_PAGE_SIZES), min(PAGED_MQA_PAGE_SIZES)
+    if (
+        current_platform.is_device_capability_family(120)
+        and storage >= 64
+        and storage % 64 == 0
+    ):
+        # Avoid the SM120 non-FP4 DeepGEMM block_kv assertion by using its
+        # required 64-entry page. This architecture-specific constraint can
+        # go once DeepGEMM exposes a queryable page capability.
+        return 64
     if storage <= max_page:
         return storage
     return max_page if storage % max_page == 0 else min_page
