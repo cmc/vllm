@@ -59,6 +59,7 @@ def _validate_bf16_backend(
     qk_rope_head_dim: int,
     *,
     has_sparse_api: bool,
+    dcp_size: int = 1,
 ) -> list[str]:
     import vllm.config as config_module
     from vllm.platforms.interface import DeviceCapability
@@ -77,6 +78,7 @@ def _validate_bf16_backend(
                 kv_lora_rank=512,
             ),
         ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
     )
     with (
         mock.patch.object(config_module, "get_current_vllm_config", return_value=config),
@@ -106,7 +108,16 @@ def test_bf16_nope_backend_configuration_is_valid() -> None:
     assert invalid_reasons == []
 
 
-def test_bf16_rope_backend_configuration_is_rejected() -> None:
+def test_bf16_unsupported_backend_configurations_are_rejected() -> None:
+    invalid_reasons = _validate_bf16_backend(
+        0,
+        has_sparse_api=False,
+        dcp_size=2,
+    )
+    assert any("decode context parallelism" in reason for reason in invalid_reasons), (
+        invalid_reasons
+    )
+
     invalid_reasons = _validate_bf16_backend(64, has_sparse_api=True)
     assert any("native NoPE" in reason for reason in invalid_reasons), invalid_reasons
 
@@ -127,6 +138,7 @@ def test_bf16_nope_constructor_accepts_only_nope() -> None:
         model_config=SimpleNamespace(
             hf_text_config=SimpleNamespace(model_type="glm53"),
         ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
 
     def construct(qk_rope_head_dim: int):
@@ -157,6 +169,13 @@ def test_bf16_nope_constructor_accepts_only_nope() -> None:
             pass
         else:
             raise AssertionError("BF16 SM120 compatibility requires native NoPE")
+        config.parallel_config.decode_context_parallel_size = 2
+        try:
+            construct(0)
+        except NotImplementedError as error:
+            assert "decode context parallelism" in str(error)
+        else:
+            raise AssertionError("BF16 NoPE fallback must reject DCP")
     finally:
         config_module.get_current_vllm_config = original_get_config
 
@@ -336,7 +355,7 @@ if __name__ == "__main__":
         test_bf16_nope_cache_shape,
         test_bf16_nope_cache_dtype_is_advertised,
         test_bf16_nope_backend_configuration_is_valid,
-        test_bf16_rope_backend_configuration_is_rejected,
+        test_bf16_unsupported_backend_configurations_are_rejected,
         test_fp8_nope_cache_shape,
         test_bf16_nope_constructor_accepts_only_nope,
         test_bf16_nope_forward_routes_to_fallback,

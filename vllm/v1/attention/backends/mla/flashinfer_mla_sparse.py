@@ -214,6 +214,16 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
         )
         if kv_cache_dtype == "bfloat16" and not supports_bf16_nope:
             return "bfloat16 KV cache requires native NoPE (qk_rope_head_dim=0)"
+        dcp_size = getattr(
+            getattr(vllm_config, "parallel_config", None),
+            "decode_context_parallel_size",
+            1,
+        )
+        if supports_bf16_nope and dcp_size > 1:
+            return (
+                "bfloat16 native-NoPE fallback does not support "
+                "decode context parallelism"
+            )
         # The BF16 NoPE path is implemented entirely with PyTorch and does not
         # depend on FlashInfer's packed sparse-MLA decode API.
         if not supports_bf16_nope and not has_flashinfer_sparse_mla_sm120():

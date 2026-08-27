@@ -83,11 +83,12 @@ an explicit BF16 KV cache.
 
 The SM120 backend's dtype list advertises BF16, while combination selection
 accepts it only for a resolved model configuration with
-`qk_rope_head_dim == 0`. That BF16 NoPE combination does not require
-FlashInfer's sparse SM120 API because it is implemented in PyTorch. The
-implementation constructor repeats the same gate, so BF16 with a nonzero RoPE
-dimension is rejected before execution. The existing `fp8_ds_mla` route and
-its FlashInfer API requirement remain unchanged.
+`qk_rope_head_dim == 0` and decode context parallelism disabled. That BF16 NoPE
+combination does not require FlashInfer's sparse SM120 API because it is
+implemented in PyTorch. The implementation constructor repeats both gates, so
+BF16 with a nonzero RoPE dimension or `decode_context_parallel_size > 1` is
+rejected before execution. The existing `fp8_ds_mla` route and its FlashInfer
+API requirement remain unchanged.
 
 ### Physical sparse indices and reference attention
 
@@ -102,6 +103,10 @@ index, masks entries beyond each valid count, and performs the two attention
 matrix products with `torch.bmm`. It processes query tokens in chunks to bound
 temporary gather, score, and probability tensors. Empty selections return
 finite zeros. This is intentionally an unfused reference path.
+
+The fallback returns no log-sum-exp tensor. Decode context parallelism needs
+rank-local index filtering plus per-shard LSE for cross-shard reduction, so DCP
+is explicitly rejected rather than returning incomplete or incorrect output.
 
 ### SM120 kpool pages
 
@@ -137,6 +142,8 @@ Costs and limitations:
   memory traffic and dispatch overhead relative to a fused sparse-MLA kernel.
 - The 64-entry page rule is hard-coded for the current SM120 non-FP4 DeepGEMM
   contract.
+- Decode context parallelism is unsupported because the fallback does not
+  implement shard-local index filtering and LSE reduction.
 - The branch uses the historical GLM integration commit because later vLLM
   revisions have incompatible cache and page APIs.
 
@@ -180,15 +187,16 @@ failures:
 5. `test_bf16_nope_backend_configuration_is_valid` — baseline failed when the
    FlashInfer SM120 sparse API was unavailable; the fallback must still be
    selectable for explicit BF16 NoPE.
-6. `test_bf16_rope_backend_configuration_is_rejected` — baseline failed to
-   report the required native-NoPE rejection when that FlashInfer API was
-   available; explicit BF16 with `qk_rope_head_dim=64` must be rejected.
+6. `test_bf16_unsupported_backend_configurations_are_rejected` — baseline
+   failed to report the required restrictions. Explicit BF16 with
+   `qk_rope_head_dim=64` is rejected even when the FlashInfer API is available,
+   and BF16 NoPE with decode context parallelism is also rejected.
 7. `test_fp8_nope_cache_shape` — baseline control passed: explicit
    `fp8_ds_mla` remained `(72, 64, 656)`.
 8. `test_bf16_nope_constructor_accepts_only_nope` — baseline rejected the BF16
    NoPE constructor; the patched constructor accepts the real
    `qk_nope_head_dim=256`, `kv_lora_rank=512`, zero-RoPE configuration and
-   rejects nonzero RoPE.
+   rejects nonzero RoPE and decode context parallelism.
 9. `test_bf16_nope_forward_routes_to_fallback` — baseline did not request
    `return_valid_counts=True` or route physical indices and counts to the
    fallback.
@@ -245,6 +253,7 @@ controls as passed and all nine compatibility assertions as failed.
 - No FP4 cache implementation.
 - No fused GLM-5.3 NoPE kernel.
 - No multi-token prediction (MTP) validation.
+- No decode context parallelism implementation for the BF16 fallback.
 - No claim that this path has upstream-quality performance.
 
 ## Rejected alternatives

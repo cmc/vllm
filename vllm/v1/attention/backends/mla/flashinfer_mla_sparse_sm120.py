@@ -83,6 +83,16 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
+        dcp_size = getattr(
+            getattr(vllm_config, "parallel_config", None),
+            "decode_context_parallel_size",
+            1,
+        )
+        if supports_bf16_nope and dcp_size > 1:
+            raise NotImplementedError(
+                "BF16 native-NoPE fallback does not support decode context "
+                "parallelism because it cannot return per-shard LSE"
+            )
         model_type = None
         if vllm_config.model_config is not None:
             model_type = getattr(

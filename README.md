@@ -40,6 +40,8 @@ that matches the validated runtime image.
   slower than a fused sparse-MLA kernel.
 - This fork does not implement or claim FP4 KV cache, MTP validation, a fused
   NoPE kernel, or upstream-quality performance.
+- Decode context parallelism is rejected because this reference path does not
+  produce the per-shard indices and LSE required for cross-shard reduction.
 - The SM120 64-entry page rule is architecture-specific and should be removed
   when the underlying kernels expose a compatible native capability.
 
