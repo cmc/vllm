@@ -253,12 +253,14 @@ controls as passed and all nine compatibility assertions as failed.
 
 The following sanitized launch reproduces the validated four-GPU configuration.
 First acquire the exact public model and tokenizer revision used for the
-recorded results:
+recorded results. Replace `/mnt/models` with storage outside this repository
+that has at least 350 GiB free:
 
 ```bash
 # Requires the Hugging Face CLI from the huggingface_hub package.
 export MODEL_REVISION=3f1971b7b5f7a528c9c4ef6212c8785298a8c24a
-export MODEL_DIR="$PWD/models/GLM-5.3-Flash-$MODEL_REVISION"
+# Keep this large checkpoint outside the repository and Docker build context.
+export MODEL_DIR="/mnt/models/GLM-5.3-Flash-$MODEL_REVISION"
 
 hf download zai-org/GLM-5.3-Flash \
   --revision "$MODEL_REVISION" \
